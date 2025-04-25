@@ -24,39 +24,36 @@ type Config struct {
 	CheckMX            bool     `yaml:"checkMX"`
 	CheckDisposable    bool     `yaml:"checkDisposable"`
 	ThankYouURL        string   `yaml:"thankYouURL"`
-
 	OnError struct {
 		Method      string `yaml:method`
 		ForwardData bool   `yaml:forwardData`
 		Action      string `yaml:action`
 	} `yaml:"onError"`
-
+	Webhook struct {
+		SuccessURL string `yaml:"successURL"`
+		FailureURL string `yaml:"failureURL"`
+	} `yaml:"webhook"`
 	Health struct {
 		Route string `yaml:"route"`
 	} `yaml:"health"`
-
 	Metrics struct {
 		Enabled bool   `yaml:"enabled"`
 		Address string `yaml:"address"`
 		Route   string `yaml:"route"`
 	} `yaml:"metrics"`
-	
 	DisposableDomains struct {
-		LocalFile      string        `yaml:"localFile"`
-		RemoteURL      string        `yaml:"remoteURL"`
-		CacheTTLMin    int           `yaml:"cacheTTLMinutes"`
-		LastLoadedTime time.Time     `yaml:"-"`
+		LocalFile      string              `yaml:"localFile"`
+		RemoteURL      string              `yaml:"remoteURL"`
+		CacheTTLMin    int                 `yaml:"cacheTTLMinutes"`
+		LastLoadedTime time.Time           `yaml:"-"`
 		Domains        map[string]struct{} `yaml:"-"`
 	} `yaml:"disposableDomains"`
-
 	RateLimit struct {
-		Enabled          bool `yaml:"enabled"`
-		RequestsPerMin   int  `yaml:"requestsPerMinute"`
-		Burst            int  `yaml:"burst"`
+		Enabled        bool `yaml:"enabled"`
+		RequestsPerMin int  `yaml:"requestsPerMinute"`
+		Burst          int  `yaml:"burst"`
 	} `yaml:"rateLimit"`
-
 	EmailVerifier EmailVerifierConfig `yaml:"emailVerifier"`
-
 	Forward struct {
 		Method string `yaml:"method"`
 		URL    string `yaml:"url"`

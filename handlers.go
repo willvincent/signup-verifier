@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +13,13 @@ import (
 	"github.com/willvincent/signup-verifier/internal/config"
 	"github.com/willvincent/signup-verifier/internal/metrics"
 )
+
+type webhookPayload struct {
+	Email     string `json:"email"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	Timestamp string `json:"timestamp"`
+}
 
 func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -34,6 +43,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Rate limit exceeded for IP: %s", ip)
 		}
+		app.fireWebhook("", "failed", "Rate limit exceeded")
 		app.handleError(w, r, "Rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
@@ -43,6 +53,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Invalid form submission: %v", err)
 		}
+		app.fireWebhook("", "failed", "Invalid form submission")
 		app.handleError(w, r, "Invalid form submission", http.StatusBadRequest)
 		return
 	}
@@ -52,6 +63,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Honeypot triggered: field=%s, value=%s", app.Config.HoneypotField, r.FormValue(app.Config.HoneypotField))
 		}
+		app.fireWebhook("", "failed", "Honeypot triggered")
 		app.redirectThankYou(w, r)
 		return
 	}
@@ -68,6 +80,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Missing required fields: %v", missing)
 		}
+		app.fireWebhook("", "failed", errMsg)
 		app.handleError(w, r, errMsg, http.StatusUnprocessableEntity)
 		return
 	}
@@ -78,6 +91,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Invalid email format: %s", email)
 		}
+		app.fireWebhook(email, "failed", "Invalid email format")
 		app.handleError(w, r, "Invalid email format", http.StatusUnprocessableEntity)
 		return
 	}
@@ -87,6 +101,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Could not extract domain from email: %s", email)
 		}
+		app.fireWebhook(email, "failed", "Could not extract domain")
 		app.handleError(w, r, "Could not extract domain", http.StatusUnprocessableEntity)
 		return
 	}
@@ -96,6 +111,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Email domain has no MX record: %s", domain)
 		}
+		app.fireWebhook(email, "failed", "Email domain has no MX record")
 		app.handleError(w, r, "Email domain has no MX record", http.StatusUnprocessableEntity)
 		return
 	}
@@ -105,6 +121,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		if Debug {
 			log.Printf("Disposable email not allowed: %s", domain)
 		}
+		app.fireWebhook(email, "failed", "Disposable email not allowed")
 		app.handleError(w, r, "Disposable email not allowed", http.StatusUnprocessableEntity)
 		return
 	}
@@ -117,6 +134,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 			if Debug {
 				log.Printf("Email verification failed: %v", err)
 			}
+			app.fireWebhook(email, "failed", "Email verification failed")
 			if !app.Config.EmailVerifier.FailOpen {
 				app.handleError(w, r, "Email verification failed", http.StatusBadGateway)
 				return
@@ -127,6 +145,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 			if Debug {
 				log.Printf("Email failed verification: %s", email)
 			}
+			app.fireWebhook(email, "failed", "Email failed verification")
 			app.handleError(w, r, "Email failed verification", http.StatusUnprocessableEntity)
 			return
 		} else {
@@ -151,6 +170,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 			if Debug {
 				log.Printf("Failed to forward submission: %v", err)
 			}
+			app.fireWebhook(email, "failed", "Failed to forward submission")
 			app.handleError(w, r, "Failed to forward submission", http.StatusBadGateway)
 			return
 		}
@@ -164,6 +184,7 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if Debug {
 		log.Printf("Signup successful for email: %s, initiating redirect to %s", email, app.Config.ThankYouURL)
 	}
+	app.fireWebhook(email, "success", "")
 	app.redirectThankYou(w, r)
 }
 
@@ -243,4 +264,51 @@ func (app *App) redirectThankYou(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Redirecting client to %s with GET, status=%d, Location header=%s", app.Config.ThankYouURL, http.StatusFound, w.Header().Get("Location"))
 	}
 	http.Redirect(w, r, app.Config.ThankYouURL, http.StatusFound)
+}
+
+func (app *App) fireWebhook(email, status, errorMsg string) {
+	var webhookURL string
+	if status == "success" {
+		webhookURL = app.Config.Webhook.SuccessURL
+	} else {
+		webhookURL = app.Config.Webhook.FailureURL
+	}
+
+	if webhookURL == "" {
+		if Debug {
+			log.Printf("No webhook URL configured for %s status", status)
+		}
+		return
+	}
+
+	payload := webhookPayload{
+		Email:     email,
+		Status:    status,
+		Error:     errorMsg,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		if Debug {
+			log.Printf("Failed to marshal webhook payload: %v", err)
+		}
+		return
+	}
+
+	go func() {
+		if Debug {
+			log.Printf("Sending webhook to %s: payload=%s", webhookURL, string(body))
+		}
+		resp, err := app.HTTPClient.Post(webhookURL, "application/json", bytes.NewReader(body))
+		if err != nil {
+			if Debug {
+				log.Printf("Webhook request to %s failed: %v", webhookURL, err)
+			}
+			return
+		}
+		defer resp.Body.Close()
+		if Debug {
+			log.Printf("Webhook request to %s returned status: %d", webhookURL, resp.StatusCode)
+		}
+	}()
 }

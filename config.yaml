@@ -38,8 +38,12 @@ onError:
   forwardData: true
   action: "json" # "json" - Return error message, "redirect" - Redirect to thank you url
 
-thankYouURL: "http://dmp.test"
+thankYouURL: "/thanks"
 
 forward:
   method: "POST"
-  url: "http://localhost:9900"
+  url: "http://localhost"
+
+webhook:
+  successURL: "http://localhost"
+  failureURL: "http://localhost"

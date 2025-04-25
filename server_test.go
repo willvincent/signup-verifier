@@ -1,9 +1,9 @@
 //go:build test
-
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -96,6 +96,10 @@ func basicTestConfig() *config.Config {
 			Method:      "",
 			ForwardData: false,
 		},
+		Webhook: struct {
+			SuccessURL string `yaml:"successURL"`
+			FailureURL string `yaml:"failureURL"`
+		}{},
 	}
 }
 
@@ -193,6 +197,10 @@ func Test_handleSignup(t *testing.T) {
 		expectedStatus int
 		expectedBody   string
 		expectedMetric string
+		expectedWebhook struct {
+			URL     string
+			Payload webhookPayload
+		}
 	}{
 		{
 			name:           "non-POST method",
@@ -203,90 +211,280 @@ func Test_handleSignup(t *testing.T) {
 		},
 		{
 			name: "rate limit exceeded",
-			cfg:  basicTestConfig(),
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
+				return cfg
+			}(),
 			setup: func(t *testing.T, app *App) {
 				app.Config.RateLimit.Enabled = true
 				app.Config.RateLimit.RequestsPerMin = 1
 				app.Config.RateLimit.Burst = 1
 				app.Limiter = ratelimit.New(1, 1)
 				app.Limiter.Allow("1.2.3.4")
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "" || payload.Status != "failed" || payload.Error != "Rate limit exceeded" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
 			},
 			method:         http.MethodPost,
 			headers:        map[string]string{"X-Forwarded-For": "1.2.3.4"},
 			expectedStatus: http.StatusTooManyRequests,
 			expectedBody:   `{"error": "Rate limit exceeded"}`,
 			expectedMetric: "rate_limited",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "",
+					Status: "failed",
+					Error:  "Rate limit exceeded",
+				},
+			},
 		},
 		{
-			name:           "invalid form",
-			cfg:            basicTestConfig(),
+			name: "invalid form",
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
+				return cfg
+			}(),
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"invalid@@example.com"}},
+			setup: func(t *testing.T, app *App) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "invalid@@example.com" || payload.Status != "failed" || payload.Error != "Invalid email format" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
+			},
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   `{"error": "Invalid email format"}`,
 			expectedMetric: "invalid_email_format",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "invalid@@example.com",
+					Status: "failed",
+					Error:  "Invalid email format",
+				},
+			},
 		},
 		{
 			name: "honeypot triggered",
 			cfg: func() *config.Config {
 				cfg := basicTestConfig()
 				cfg.HoneypotField = "botfield"
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
 				return cfg
 			}(),
 			method:         http.MethodPost,
 			formValues:     url.Values{"botfield": {"bot"}, "email": {"test@example.com"}},
+			setup: func(t *testing.T, app *App) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "" || payload.Status != "failed" || payload.Error != "Honeypot triggered" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
+			},
 			expectedStatus: http.StatusFound,
 			expectedBody:   "",
 			expectedMetric: "bot_trap",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "",
+					Status: "failed",
+					Error:  "Honeypot triggered",
+				},
+			},
 		},
 		{
-			name:           "missing required field",
+			name: "missing required field",
 			cfg: func() *config.Config {
 				cfg := basicTestConfig()
 				cfg.RequiredFields = []string{"email"}
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
 				return cfg
 			}(),
 			method:         http.MethodPost,
 			formValues:     url.Values{},
+			setup: func(t *testing.T, app *App) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "" || payload.Status != "failed" || payload.Error != "Missing required fields: email" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
+			},
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   `{"error": "Missing required fields: email"}`,
 			expectedMetric: "missing_fields",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "",
+					Status: "failed",
+					Error:  "Missing required fields: email",
+				},
+			},
 		},
 		{
-			name:           "invalid email format",
-			cfg:            basicTestConfig(),
+			name: "invalid email format",
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
+				return cfg
+			}(),
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"bademail"}},
+			setup: func(t *testing.T, app *App) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "bademail" || payload.Status != "failed" || payload.Error != "Invalid email format" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
+			},
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   `{"error": "Invalid email format"}`,
 			expectedMetric: "invalid_email_format",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "bademail",
+					Status: "failed",
+					Error:  "Invalid email format",
+				},
+			},
 		},
 		{
-			name:           "invalid email with no domain",
-			cfg:            basicTestConfig(),
+			name: "invalid email with no domain",
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
+				return cfg
+			}(),
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"user@"}},
+			setup: func(t *testing.T, app *App) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@" || payload.Status != "failed" || payload.Error != "Invalid email format" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
+			},
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   `{"error": "Invalid email format"}`,
 			expectedMetric: "invalid_email_format",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "user@",
+					Status: "failed",
+					Error:  "Invalid email format",
+				},
+			},
 		},
 		{
 			name: "no MX record",
 			cfg: func() *config.Config {
 				cfg := basicTestConfig()
 				cfg.CheckMX = true
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
 				return cfg
 			}(),
 			setup: func(t *testing.T, app *App) {
 				app.LookupMXFunc = func(domain string) ([]*net.MX, error) {
 					return nil, fmt.Errorf("no MX records")
 				}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@bad.com" || payload.Status != "failed" || payload.Error != "Email domain has no MX record" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
 			},
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"user@bad.com"}},
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   `{"error": "Email domain has no MX record"}`,
 			expectedMetric: "mx_failed",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "user@bad.com",
+					Status: "failed",
+					Error:  "Email domain has no MX record",
+				},
+			},
 		},
 		{
 			name: "disposable domain",
@@ -302,13 +500,39 @@ func Test_handleSignup(t *testing.T) {
 				}{
 					Domains: map[string]struct{}{"example.com": {}},
 				}
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
 				return cfg
 			}(),
+			setup: func(t *testing.T, app *App) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@example.com" || payload.Status != "failed" || payload.Error != "Disposable email not allowed" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
+			},
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"user@example.com"}},
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   `{"error": "Disposable email not allowed"}`,
 			expectedMetric: "disposable_email",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "user@example.com",
+					Status: "failed",
+					Error:  "Disposable email not allowed",
+				},
+			},
 		},
 		{
 			name: "email verification failure",
@@ -316,16 +540,40 @@ func Test_handleSignup(t *testing.T) {
 				cfg := basicTestConfig()
 				cfg.EmailVerifier.Provider = "dummy"
 				cfg.EmailVerifier.FailOpen = false
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
 				return cfg
 			}(),
 			setup: func(t *testing.T, app *App) {
 				app.Verifier = &dummyVerifier{valid: false}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@example.com" || payload.Status != "failed" || payload.Error != "Email failed verification" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
 			},
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"user@example.com"}},
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   `{"error": "Email failed verification"}`,
 			expectedMetric: "email_invalid",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "user@example.com",
+					Status: "failed",
+					Error:  "Email failed verification",
+				},
+			},
 		},
 		{
 			name: "email verification error with fail open",
@@ -333,37 +581,109 @@ func Test_handleSignup(t *testing.T) {
 				cfg := basicTestConfig()
 				cfg.EmailVerifier.Provider = "dummy"
 				cfg.EmailVerifier.FailOpen = true
+				cfg.Webhook.SuccessURL = "http://localhost/webhook/success"
 				return cfg
 			}(),
 			setup: func(t *testing.T, app *App) {
 				app.Verifier = &dummyVerifier{err: fmt.Errorf("verifier error")}
+				forwardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
+				webhookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@example.com" || payload.Status != "success" || payload.Error != "" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(forwardServer.Close)
+				t.Cleanup(webhookServer.Close)
+				app.Config.Forward.URL = forwardServer.URL
+				app.Config.Webhook.SuccessURL = webhookServer.URL
 			},
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"user@example.com"}},
 			expectedStatus: http.StatusFound,
 			expectedBody:   "",
 			expectedMetric: "success",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "user@example.com",
+					Status: "success",
+					Error:  "",
+				},
+			},
 		},
 		{
 			name: "successful signup with forwarding",
-			cfg:  basicTestConfig(),
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.Webhook.SuccessURL = "http://localhost/webhook/success"
+				return cfg
+			}(),
 			setup: func(t *testing.T, app *App) {
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				forwardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
 				}))
-				t.Cleanup(server.Close)
-				app.Config.Forward.URL = server.URL
+				webhookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@example.com" || payload.Status != "success" || payload.Error != "" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(forwardServer.Close)
+				t.Cleanup(webhookServer.Close)
+				app.Config.Forward.URL = forwardServer.URL
+				app.Config.Webhook.SuccessURL = webhookServer.URL
 			},
 			method:         http.MethodPost,
 			formValues:     url.Values{"email": {"user@example.com"}},
 			expectedStatus: http.StatusFound,
 			expectedBody:   "",
 			expectedMetric: "success",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "user@example.com",
+					Status: "success",
+					Error:  "",
+				},
+			},
 		},
 		{
 			name: "forwarding error",
-			cfg:  basicTestConfig(),
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
+				return cfg
+			}(),
 			setup: func(t *testing.T, app *App) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload webhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@example.com" || payload.Status != "failed" || !strings.Contains(payload.Error, "Failed to forward submission") {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(server.Close)
+				app.Config.Webhook.FailureURL = server.URL
 				app.HTTPClient = &http.Client{
 					Transport: &http.Transport{
 						DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -377,6 +697,17 @@ func Test_handleSignup(t *testing.T) {
 			expectedStatus: http.StatusBadGateway,
 			expectedBody:   `{"error": "Failed to forward submission"}`,
 			expectedMetric: "forward_error",
+			expectedWebhook: struct {
+				URL     string
+				Payload webhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: webhookPayload{
+					Email:  "user@example.com",
+					Status: "failed",
+					Error:  "Failed to forward submission",
+				},
+			},
 		},
 	}
 
