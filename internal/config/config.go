@@ -16,15 +16,20 @@ type EmailVerifierConfig struct {
 }
 
 type Config struct {
-	ListenAddress     string   `yaml:"listenAddress"`
-	Route             string   `yaml:"route"`
-	RequiredFields    []string `yaml:"requiredFields"`
-	AllowedFields     []string `yaml:"allowedFields"`
-	HoneypotField     string   `yaml:"honeypotField"`
-	CheckMX           bool     `yaml:"checkMX"`
-	CheckDisposable   bool     `yaml:"checkDisposable"`
-	ThankYouURL       string   `yaml:"thankYouURL"`
-	OnError           string   `yaml:"onError"`
+	ListenAddress      string   `yaml:"listenAddress"`
+	Route              string   `yaml:"route"`
+	RequiredFields     []string `yaml:"requiredFields"`
+	AllowedFields      []string `yaml:"allowedFields"`
+	HoneypotField      string   `yaml:"honeypotField"`
+	CheckMX            bool     `yaml:"checkMX"`
+	CheckDisposable    bool     `yaml:"checkDisposable"`
+	ThankYouURL        string   `yaml:"thankYouURL"`
+
+	OnError struct {
+		Method      string `yaml:method`
+		ForwardData bool   `yaml:forwardData`
+		Action      string `yaml:Action`
+	}
 
 	Health struct {
 		Route string `yaml:"route"`

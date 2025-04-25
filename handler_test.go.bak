@@ -1,0 +1,284 @@
+// package main
+
+// import (
+// 	"fmt"
+// 	"net/http"
+// 	"net/http/httptest"
+// 	"net/url"
+// 	"strings"
+// 	"testing"
+
+// 	"github.com/willvincent/signup-verifier/internal/config"
+// 	"github.com/willvincent/signup-verifier/internal/ratelimit"
+// )
+
+// type mockVerifierReject struct{}
+// type mockVerifierError struct{}
+
+// func (m *mockVerifierReject) Verify(email string) (bool, error) {
+// 	return false, nil
+// }
+
+// func (m *mockVerifierError) Verify(email string) (bool, error) {
+// 	return false, fmt.Errorf("verifier died")
+// }
+
+// func TestHandleSignup_Success(t *testing.T) {
+// 	cfg = ConfigStub() // inject a minimal valid config
+// 	limiter = nil       // disable rate limiter for test
+// 	activeVerifier = nil
+
+// 	form := url.Values{}
+// 	form.Set("email", "test@example.com")
+// 	form.Set("name", "Test User")
+
+// 	req := httptest.NewRequest("POST", "/signup", strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusFound && rr.Code != http.StatusOK {
+// 		t.Errorf("Expected 200 or 302, got %d", rr.Code)
+// 	}
+// }
+
+// func ConfigStub() *config.Config {
+// 	return &config.Config{
+// 		ListenAddress:  ":8080",
+// 		Route:          "/signup",
+// 		ThankYouURL:    "/thanks",
+// 		OnError:        "json",
+// 		RequiredFields: []string{"email", "name"},
+// 		AllowedFields:  []string{"email", "name"},
+// 		HoneypotField:  "nickname",
+// 		Forward: struct {
+// 			Method string `yaml:"method"`
+// 			URL    string `yaml:"url"`
+// 		}{
+// 			Method: "POST",
+// 			URL:    "http://example.com/fake-forward", // avoid real request
+// 		},
+// 	}
+// }
+
+// func TestHandleSignup_HoneypotTriggered(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	limiter = nil
+// 	activeVerifier = nil
+
+// 	form := url.Values{}
+// 	form.Set("email", "bot@example.com")
+// 	form.Set("name", "Sneaky Bot")
+// 	form.Set("nickname", "definitely-a-bot") // honeypot
+
+// 	req := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusFound {
+// 		t.Errorf("Expected redirect to ThankYouURL, got %d", rr.Code)
+// 	}
+
+// 	// Bonus: check Location header if you want
+// 	location := rr.Header().Get("Location")
+// 	if location != cfg.ThankYouURL {
+// 		t.Errorf("Expected redirect to %s, got %s", cfg.ThankYouURL, location)
+// 	}
+// }
+
+// func TestHandleSignup_MissingRequiredField(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	limiter = nil
+// 	activeVerifier = nil
+
+// 	form := url.Values{}
+// 	form.Set("email", "missingname@example.com")
+// 	// missing "name" field
+
+// 	req := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusUnprocessableEntity {
+// 		t.Errorf("Expected 422 for missing field, got %d", rr.Code)
+// 	}
+// }
+
+// func TestHandleSignup_InvalidEmailFormat(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	limiter = nil
+// 	activeVerifier = nil
+
+// 	form := url.Values{}
+// 	form.Set("email", "not-an-email")
+// 	form.Set("name", "Invalid Format")
+
+// 	req := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusUnprocessableEntity {
+// 		t.Errorf("Expected 422 for invalid email format, got %d", rr.Code)
+// 	}
+// }
+
+// func TestHandleSignup_VerifierRejects(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	limiter = nil
+// 	activeVerifier = &mockVerifierReject{}
+
+// 	form := url.Values{}
+// 	form.Set("email", "rejectme@example.com")
+// 	form.Set("name", "Verifier Fail")
+
+// 	req := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusUnprocessableEntity {
+// 		t.Errorf("Expected 422 for verifier rejection, got %d", rr.Code)
+// 	}
+// }
+
+// func TestHandleSignup_VerifierError_FailOpen(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	cfg.EmailVerifier.FailOpen = true
+// 	limiter = nil
+// 	activeVerifier = &mockVerifierError{}
+
+// 	form := url.Values{}
+// 	form.Set("email", "errorok@example.com")
+// 	form.Set("name", "Verifier Panic")
+
+// 	req := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusFound {
+// 		t.Errorf("Expected 302 redirect even if verifier errored (fail-open), got %d", rr.Code)
+// 	}
+// }
+
+// func TestHandleSignup_ForwardFails(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	cfg.Forward.URL = "http://127.0.0.1:9999/not-a-real-endpoint" // force failure
+// 	limiter = nil
+// 	activeVerifier = nil
+
+// 	form := url.Values{}
+// 	form.Set("email", "forwardfail@example.com")
+// 	form.Set("name", "Oops")
+
+// 	req := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusBadGateway {
+// 		t.Errorf("Expected 502 for forward failure, got %d", rr.Code)
+// 	}
+// }
+
+// func TestHandleSignup_ForwardSuccess(t *testing.T) {
+// 	// spin up a mock server to accept POST
+// 	mockForward := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		if r.Method != http.MethodPost {
+// 			t.Errorf("Expected POST, got %s", r.Method)
+// 		}
+// 		if err := r.ParseForm(); err != nil {
+// 			t.Errorf("Failed to parse form: %v", err)
+// 		}
+// 		if r.FormValue("email") != "pass@example.com" {
+// 			t.Errorf("Expected email 'pass@example.com', got %s", r.FormValue("email"))
+// 		}
+// 		w.WriteHeader(http.StatusOK)
+// 	}))
+// 	defer mockForward.Close()
+
+// 	cfg = ConfigStub()
+// 	cfg.Forward.URL = mockForward.URL
+// 	limiter = nil
+// 	activeVerifier = nil
+
+// 	form := url.Values{}
+// 	form.Set("email", "pass@example.com")
+// 	form.Set("name", "Forward Me")
+
+// 	req := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+// 	rr := httptest.NewRecorder()
+// 	handleSignup(rr, req)
+
+// 	if rr.Code != http.StatusFound {
+// 		t.Errorf("Expected 302 after successful forward, got %d", rr.Code)
+// 	}
+// }
+
+// func TestHandleSignup_RateLimited(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	cfg.RateLimit.Enabled = true
+// 	cfg.RateLimit.RequestsPerMin = 1
+// 	cfg.RateLimit.Burst = 1
+// 	activeVerifier = nil
+// 	limiter = ratelimit.New(1, 1)
+
+// 	form := url.Values{}
+// 	form.Set("email", "spam@example.com")
+// 	form.Set("name", "Spam Bot")
+
+// 	// First request
+// 	req1 := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+// 	req1.RemoteAddr = "1.2.3.4:12345"
+// 	rr1 := httptest.NewRecorder()
+// 	handleSignup(rr1, req1)
+
+// 	// Second request
+// 	req2 := httptest.NewRequest("POST", cfg.Route, strings.NewReader(form.Encode()))
+// 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+// 	req2.RemoteAddr = "1.2.3.4:12345"
+// 	rr2 := httptest.NewRecorder()
+// 	handleSignup(rr2, req2)
+
+// 	if rr2.Code != http.StatusTooManyRequests {
+// 		t.Errorf("Expected 429 Too Many Requests, got %d", rr2.Code)
+// 	}
+// }
+
+
+
+// func TestHealthEndpoint(t *testing.T) {
+// 	cfg = ConfigStub()
+// 	cfg.Health.Route = "/healthz"
+
+// 	rr := httptest.NewRecorder()
+// 	req := httptest.NewRequest("GET", cfg.Health.Route, nil)
+
+// 	// manually call the health handler
+// 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		w.Header().Set("Content-Type", "application/json")
+// 		w.WriteHeader(http.StatusOK)
+// 		fmt.Fprint(w, `{"status":"ok"}`)
+// 	})
+// 	handler.ServeHTTP(rr, req)
+
+// 	if rr.Code != http.StatusOK {
+// 		t.Errorf("Expected 200 OK, got %d", rr.Code)
+// 	}
+// 	if body := strings.TrimSpace(rr.Body.String()); body != `{"status":"ok"}` {
+// 		t.Errorf("Unexpected response body: %s", body)
+// 	}
+// }

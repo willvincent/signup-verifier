@@ -7,6 +7,8 @@ import (
 	"net/url"
 )
 
+var EmailableAPIBase = "https://api.emailable.com/v1"
+
 type Emailable struct {
 	APIKey string
 }
@@ -24,7 +26,7 @@ func NewEmailable(apiKey string) *Emailable {
 }
 
 func (e *Emailable) Verify(email string) (bool, error) {
-	reqUrl := fmt.Sprintf("https://api.emailable.com/v1/verify?email=%s&api_key=%s", url.QueryEscape(email), e.APIKey)
+	reqUrl := fmt.Sprintf("%s/verify?email=%s&api_key=%s", EmailableAPIBase, url.QueryEscape(email), e.APIKey)
 	resp, err := http.Get(reqUrl)
 	if err != nil {
 		return false, err
@@ -32,7 +34,7 @@ func (e *Emailable) Verify(email string) (bool, error) {
 	defer resp.Body.Close()
 
 	var result struct {
-		Deliverability string `json:"deliverability"` // "deliverable", "undeliverable"
+		Deliverability string `json:"state"` // "deliverable", "undeliverable"
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return false, err

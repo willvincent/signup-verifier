@@ -7,6 +7,8 @@ import (
 	"net/url"
 )
 
+var ZeroBounceAPIBase = "https://api.zerobounce.net/v2"
+
 type ZeroBounce struct {
 	APIKey string
 }
@@ -24,7 +26,7 @@ func NewZeroBounce(apiKey string) *ZeroBounce {
 }
 
 func (z *ZeroBounce) Verify(email string) (bool, error) {
-	reqUrl := fmt.Sprintf("https://api.zerobounce.net/v2/validate?api_key=%s&email=%s", z.APIKey, url.QueryEscape(email))
+	reqUrl := fmt.Sprintf("%s/validate?api_key=%s&email=%s", ZeroBounceAPIBase, z.APIKey, url.QueryEscape(email))
 	resp, err := http.Get(reqUrl)
 	if err != nil {
 		return false, err

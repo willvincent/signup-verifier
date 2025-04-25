@@ -4,6 +4,7 @@ requiredFields: ["email", "name"]
 allowedFields: ["email", "name", "company"]
 honeypotField: "nickname"
 
+
 metrics:
   enabled: true
   address: ":2112"
@@ -32,9 +33,13 @@ rateLimit:
   requestsPerMinute: 20
   burst: 5
 
-onError: "redirect"
-thankYouURL: "https://yourdomain.com/thanks"
+onError:
+  method: "GET"
+  forwardData: true
+  action: "json" # "json" - Return error message, "redirect" - Redirect to thank you url
+
+thankYouURL: "http://dmp.test"
 
 forward:
   method: "POST"
-  url: "https://your.list-signup.endpoint/subscribe"
+  url: "http://localhost:9900"
