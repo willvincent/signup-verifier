@@ -1,0 +1,40 @@
+listenAddress: ":8080"
+route: "/signup"
+requiredFields: ["email", "name"]
+allowedFields: ["email", "name", "company"]
+honeypotField: "nickname"
+
+metrics:
+  enabled: true
+  address: ":2112"
+  route: "/metrics"
+
+health:
+  route: "/healthz"
+
+checkMX: true
+checkDisposable: true
+
+disposableDomains:
+  localFile: "./disposable_domains.txt"
+  remoteURL: "https://raw.githubusercontent.com/wesbos/burner-email-providers/master/emails.txt"
+  cacheTTLMinutes: 60
+
+emailVerifier:
+  provider: ""             # "zerobounce", "emailable", or "" to disable
+  apiKey: "your-key-here"
+  timeoutSeconds: 5        # optional, default 5
+  maxRetries: 1            # optional, default 0
+  failOpen: false          # if true, fallback to allow on error
+
+rateLimit:
+  enabled: true
+  requestsPerMinute: 20
+  burst: 5
+
+onError: "redirect"
+thankYouURL: "https://yourdomain.com/thanks"
+
+forward:
+  method: "POST"
+  url: "https://your.list-signup.endpoint/subscribe"
