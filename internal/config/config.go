@@ -58,6 +58,17 @@ type Config struct {
 		Method string `yaml:"method"`
 		URL    string `yaml:"url"`
 	} `yaml:"forward"`
+	EmailForward struct {
+		Enabled   bool   `yaml:"enabled"`
+		Recipient string `yaml:"recipient"`
+		Sender    string `yaml:"sender"`
+		SMTP      struct {
+			Host     string `yaml:"host"`
+			Port     int    `yaml:"port"`
+			Username string `yaml:"username"`
+			Password string `yaml:"password"`
+		} `yaml:"smtp"`
+	} `yaml:"emailForward"`
 }
 
 func LoadConfig(path string) (*Config, error) {

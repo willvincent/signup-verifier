@@ -47,3 +47,13 @@ forward:
 webhook:
   successURL: "http://localhost"
   failureURL: "http://localhost"
+
+emailForward:
+  enabled: true
+  recipient: "contact@yourdomain.com"
+  sender: "no-reply@yourdomain.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
+    username: "your-username"
+    password: "your-password"

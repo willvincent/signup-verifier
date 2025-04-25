@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"strings"
 	"time"
@@ -180,6 +181,22 @@ func (app *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if app.Config.EmailForward.Enabled {
+		err := app.sendEmail(email, payload)
+		if err != nil {
+			metrics.SignupAttempts.WithLabelValues("email_forward_error").Inc()
+			if Debug {
+				log.Printf("Failed to send email: %v", err)
+			}
+			app.fireWebhook(email, "failed", "Failed to send email")
+			app.handleError(w, r, "Failed to send email", http.StatusBadGateway)
+			return
+		}
+		if Debug {
+			log.Printf("Successfully sent email to %s", app.Config.EmailForward.Recipient)
+		}
+	}
+
 	metrics.SignupAttempts.WithLabelValues("success").Inc()
 	if Debug {
 		log.Printf("Signup successful for email: %s, initiating redirect to %s", email, app.Config.ThankYouURL)
@@ -311,4 +328,56 @@ func (app *App) fireWebhook(email, status, errorMsg string) {
 			log.Printf("Webhook request to %s returned status: %d", webhookURL, resp.StatusCode)
 		}
 	}()
+}
+
+func (app *App) sendEmail(submitterEmail string, payload url.Values) error {
+	if !app.Config.EmailForward.Enabled {
+		return nil
+	}
+
+	// Build email body with all form fields
+	var body strings.Builder
+	body.WriteString("New Contact Form Submission\n\n")
+	body.WriteString("Submitted Fields:\n")
+	for _, field := range app.Config.AllowedFields {
+		if val := payload.Get(field); val != "" {
+			body.WriteString(fmt.Sprintf("%s: %s\n", field, val))
+		}
+	}
+	body.WriteString(fmt.Sprintf("\nTimestamp: %s\n", time.Now().UTC().Format(time.RFC3339)))
+
+	// Prepare email headers
+	from := app.Config.EmailForward.Sender
+	to := app.Config.EmailForward.Recipient
+	subject := "New Contact Form Submission"
+	msg := []byte(fmt.Sprintf(
+		"From: %s\r\n"+
+			"To: %s\r\n"+
+			"Subject: %s\r\n"+
+			"Reply-To: %s\r\n"+
+			"MIME-Version: 1.0\r\n"+
+			"Content-Type: text/plain; charset=UTF-8\r\n\r\n"+
+			"%s",
+		from, to, subject, submitterEmail, body.String(),
+	))
+
+	// SMTP settings
+	smtpHost := app.Config.EmailForward.SMTP.Host
+	smtpPort := app.Config.EmailForward.SMTP.Port
+	smtpAddr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
+	auth := smtp.PlainAuth("", app.Config.EmailForward.SMTP.Username, app.Config.EmailForward.SMTP.Password, smtpHost)
+
+	// Send email
+	if Debug {
+		log.Printf("Sending email to %s via SMTP %s", to, smtpAddr)
+	}
+	err := smtp.SendMail(smtpAddr, auth, from, []string{to}, msg)
+	if err != nil {
+		if Debug {
+			log.Printf("Failed to send email: %v", err)
+		}
+		return fmt.Errorf("failed to send email: %w", err)
+	}
+
+	return nil
 }

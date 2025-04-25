@@ -1,23 +1,69 @@
 //go:build test
+
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/emersion/go-smtp"
 	"github.com/willvincent/signup-verifier/internal/config"
 	"github.com/willvincent/signup-verifier/internal/ratelimit"
 	"github.com/willvincent/signup-verifier/internal/verifier"
 )
+
+// WebhookPayload defines the JSON payload for webhook requests.
+type WebhookPayload struct {
+	Email     string `json:"email"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	Timestamp string `json:"timestamp"`
+}
+
+// smtpBackend implements the go-smtp Backend interface for testing.
+type smtpBackend struct {
+	ReceivedEmails []string
+}
+
+func (bk *smtpBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	return &smtpSession{backend: bk}, nil
+}
+
+// smtpSession implements the go-smtp Session interface.
+type smtpSession struct {
+	backend *smtpBackend
+}
+
+func (s *smtpSession) AuthPlain(username, password string) error {
+	if username == "user" && password == "pass" {
+		return nil
+	}
+	return smtp.ErrAuthFailed
+}
+
+func (s *smtpSession) Mail(from string, opts *smtp.MailOptions) error { return nil }
+func (s *smtpSession) Rcpt(to string, opts *smtp.RcptOptions) error { return nil }
+func (s *smtpSession) Data(r io.Reader) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	s.backend.ReceivedEmails = append(s.backend.ReceivedEmails, string(data))
+	return nil
+}
+func (s *smtpSession) Reset() {}
+func (s *smtpSession) Logout() error { return nil }
 
 // dummyVerifier is a mock verifier for testing.
 type dummyVerifier struct {
@@ -199,8 +245,9 @@ func Test_handleSignup(t *testing.T) {
 		expectedMetric string
 		expectedWebhook struct {
 			URL     string
-			Payload webhookPayload
+			Payload WebhookPayload
 		}
+		expectedEmail bool
 	}{
 		{
 			name:           "non-POST method",
@@ -223,7 +270,7 @@ func Test_handleSignup(t *testing.T) {
 				app.Limiter = ratelimit.New(1, 1)
 				app.Limiter.Allow("1.2.3.4")
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -242,10 +289,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "rate_limited",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "",
 					Status: "failed",
 					Error:  "Rate limit exceeded",
@@ -263,7 +310,7 @@ func Test_handleSignup(t *testing.T) {
 			formValues:     url.Values{"email": {"invalid@@example.com"}},
 			setup: func(t *testing.T, app *App) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -280,10 +327,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "invalid_email_format",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "invalid@@example.com",
 					Status: "failed",
 					Error:  "Invalid email format",
@@ -302,7 +349,7 @@ func Test_handleSignup(t *testing.T) {
 			formValues:     url.Values{"botfield": {"bot"}, "email": {"test@example.com"}},
 			setup: func(t *testing.T, app *App) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -319,10 +366,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "bot_trap",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "",
 					Status: "failed",
 					Error:  "Honeypot triggered",
@@ -341,7 +388,7 @@ func Test_handleSignup(t *testing.T) {
 			formValues:     url.Values{},
 			setup: func(t *testing.T, app *App) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -358,10 +405,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "missing_fields",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "",
 					Status: "failed",
 					Error:  "Missing required fields: email",
@@ -379,7 +426,7 @@ func Test_handleSignup(t *testing.T) {
 			formValues:     url.Values{"email": {"bademail"}},
 			setup: func(t *testing.T, app *App) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -396,10 +443,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "invalid_email_format",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "bademail",
 					Status: "failed",
 					Error:  "Invalid email format",
@@ -417,7 +464,7 @@ func Test_handleSignup(t *testing.T) {
 			formValues:     url.Values{"email": {"user@"}},
 			setup: func(t *testing.T, app *App) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -434,10 +481,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "invalid_email_format",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "user@",
 					Status: "failed",
 					Error:  "Invalid email format",
@@ -457,7 +504,7 @@ func Test_handleSignup(t *testing.T) {
 					return nil, fmt.Errorf("no MX records")
 				}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -476,10 +523,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "mx_failed",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "user@bad.com",
 					Status: "failed",
 					Error:  "Email domain has no MX record",
@@ -505,7 +552,7 @@ func Test_handleSignup(t *testing.T) {
 			}(),
 			setup: func(t *testing.T, app *App) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -524,10 +571,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "disposable_email",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "user@example.com",
 					Status: "failed",
 					Error:  "Disposable email not allowed",
@@ -546,7 +593,7 @@ func Test_handleSignup(t *testing.T) {
 			setup: func(t *testing.T, app *App) {
 				app.Verifier = &dummyVerifier{valid: false}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -565,10 +612,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "email_invalid",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "user@example.com",
 					Status: "failed",
 					Error:  "Email failed verification",
@@ -590,7 +637,7 @@ func Test_handleSignup(t *testing.T) {
 					w.WriteHeader(http.StatusOK)
 				}))
 				webhookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -611,10 +658,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "success",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "user@example.com",
 					Status: "success",
 					Error:  "",
@@ -633,7 +680,7 @@ func Test_handleSignup(t *testing.T) {
 					w.WriteHeader(http.StatusOK)
 				}))
 				webhookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
@@ -654,10 +701,10 @@ func Test_handleSignup(t *testing.T) {
 			expectedMetric: "success",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "user@example.com",
 					Status: "success",
 					Error:  "",
@@ -665,49 +712,165 @@ func Test_handleSignup(t *testing.T) {
 			},
 		},
 		{
-			name: "forwarding error",
+			name: "successful signup with email forwarding",
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.Webhook.SuccessURL = "http://localhost/webhook/success"
+				cfg.AllowedFields = []string{"email", "name"}
+				cfg.EmailForward.Enabled = true
+				cfg.EmailForward.Recipient = "recipient@example.com"
+				cfg.EmailForward.Sender = "sender@example.com"
+				cfg.EmailForward.SMTP.Host = "localhost"
+				cfg.EmailForward.SMTP.Port = 0 // Will be set by server
+				cfg.EmailForward.SMTP.Username = "user"
+				cfg.EmailForward.SMTP.Password = "pass"
+				return cfg
+			}(),
+			setup: func(t *testing.T, app *App) {
+				// Start go-smtp server
+				backend := &smtpBackend{}
+				srv := smtp.NewServer(backend)
+				srv.Addr = "127.0.0.1:0" // Dynamic port
+				srv.Domain = "localhost"
+				srv.AllowInsecureAuth = true
+
+				listener, err := net.Listen("tcp", srv.Addr)
+				if err != nil {
+					t.Fatalf("Failed to start SMTP server: %v", err)
+				}
+
+				go func() {
+					if err := srv.Serve(listener); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+						t.Logf("SMTP server error: %v", err)
+					}
+				}()
+				t.Cleanup(func() { srv.Close() })
+
+				// Get the dynamically assigned port
+				_, port, err := net.SplitHostPort(listener.Addr().String())
+				if err != nil {
+					t.Fatalf("Failed to get SMTP server port: %v", err)
+				}
+				portInt, err := strconv.Atoi(port)
+				if err != nil {
+					t.Fatalf("Failed to parse SMTP server port: %v", err)
+				}
+				app.Config.EmailForward.SMTP.Port = portInt
+
+				forwardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
+				webhookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload WebhookPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("Failed to decode webhook payload: %v", err)
+					}
+					if payload.Email != "user@example.com" || payload.Status != "success" || payload.Error != "" {
+						t.Errorf("Unexpected webhook payload: got %+v", payload)
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(forwardServer.Close)
+				t.Cleanup(webhookServer.Close)
+				app.Config.Forward.URL = forwardServer.URL
+				app.Config.Webhook.SuccessURL = webhookServer.URL
+
+				// Validate email after test
+				t.Cleanup(func() {
+					if len(backend.ReceivedEmails) != 1 {
+						t.Errorf("Expected 1 email, got %d", len(backend.ReceivedEmails))
+						return
+					}
+					email := backend.ReceivedEmails[0]
+					fmt.Printf("Captured email: %s\n", email) // Debug logging
+					if !strings.Contains(email, "To: recipient@example.com") {
+						t.Errorf("Expected To: recipient@example.com, got %s", email)
+					}
+					if !strings.Contains(email, "From: sender@example.com") {
+						t.Errorf("Expected From: sender@example.com, got %s", email)
+					}
+					if !strings.Contains(email, "Reply-To: user@example.com") {
+						t.Errorf("Expected Reply-To: user@example.com, got %s", email)
+					}
+					if !strings.Contains(email, "Subject: New Contact Form Submission") {
+						t.Errorf("Expected Subject: New Contact Form Submission, got %s", email)
+					}
+					if !strings.Contains(email, "email: user@example.com") {
+						t.Errorf("Expected email field in body, got %s", email)
+					}
+					if !strings.Contains(email, "name: Test User") {
+						t.Errorf("Expected name field in body, got %s", email)
+					}
+				})
+			},
+			method:         http.MethodPost,
+			formValues:     url.Values{"email": {"user@example.com"}, "name": {"Test User"}},
+			expectedStatus: http.StatusFound,
+			expectedBody:   "",
+			expectedMetric: "success",
+			expectedWebhook: struct {
+				URL     string
+				Payload WebhookPayload
+			}{
+				URL: "", // Tested via setup
+				Payload: WebhookPayload{
+					Email:  "user@example.com",
+					Status: "success",
+					Error:  "",
+				},
+			},
+			expectedEmail: true,
+		},
+		{
+			name: "email forwarding failure",
 			cfg: func() *config.Config {
 				cfg := basicTestConfig()
 				cfg.Webhook.FailureURL = "http://localhost/webhook/failure"
+				cfg.EmailForward.Enabled = true
+				cfg.EmailForward.Recipient = "recipient@example.com"
+				cfg.EmailForward.Sender = "sender@example.com"
+				cfg.EmailForward.SMTP.Host = "localhost"
+				cfg.EmailForward.SMTP.Port = 9999 // Invalid port
+				cfg.EmailForward.SMTP.Username = "user"
+				cfg.EmailForward.SMTP.Password = "pass"
 				return cfg
 			}(),
 			setup: func(t *testing.T, app *App) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var payload webhookPayload
+					var payload WebhookPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("Failed to decode webhook payload: %v", err)
 					}
-					if payload.Email != "user@example.com" || payload.Status != "failed" || !strings.Contains(payload.Error, "Failed to forward submission") {
+					if payload.Email != "user@example.com" || payload.Status != "failed" || !strings.Contains(payload.Error, "Failed to send email") {
 						t.Errorf("Unexpected webhook payload: got %+v", payload)
 					}
 					w.WriteHeader(http.StatusOK)
 				}))
 				t.Cleanup(server.Close)
 				app.Config.Webhook.FailureURL = server.URL
-				app.HTTPClient = &http.Client{
-					Transport: &http.Transport{
-						DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-							return nil, fmt.Errorf("connection refused")
-						},
-					},
-				}
+				forwardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(forwardServer.Close)
+				app.Config.Forward.URL = forwardServer.URL
 			},
 			method:         http.MethodPost,
-			formValues:     url.Values{"email": {"user@example.com"}},
+			formValues:     url.Values{"email": {"user@example.com"}, "name": {"Test User"}},
 			expectedStatus: http.StatusBadGateway,
-			expectedBody:   `{"error": "Failed to forward submission"}`,
-			expectedMetric: "forward_error",
+			expectedBody:   `{"error": "Failed to send email"}`,
+			expectedMetric: "email_forward_error",
 			expectedWebhook: struct {
 				URL     string
-				Payload webhookPayload
+				Payload WebhookPayload
 			}{
 				URL: "", // Tested via setup
-				Payload: webhookPayload{
+				Payload: WebhookPayload{
 					Email:  "user@example.com",
 					Status: "failed",
-					Error:  "Failed to forward submission",
+					Error:  "Failed to send email",
 				},
 			},
+			expectedEmail: true,
 		},
 	}
 
@@ -896,9 +1059,6 @@ func Test_handleError(t *testing.T) {
 		})
 	}
 }
-
-
-
 
 func Test_isValidEmail(t *testing.T) {
 	t.Log("Running Test_isValidEmail")
@@ -1101,7 +1261,7 @@ func TestServerEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Errorf("Expected status %d, got %d", http.StatusFound, resp.StatusCode)
 	}
-	if loc := resp.Header.Get("Location"); loc != cfg.ThankYouURL {
+	if loc := resp.Header().Get("Location"); loc != cfg.ThankYouURL {
 		t.Errorf("Expected redirect to %q, got %q", cfg.ThankYouURL, loc)
 	}
 }
