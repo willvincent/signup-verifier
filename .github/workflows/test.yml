@@ -35,4 +35,4 @@ jobs:
         uses: ncruces/go-coverage-report@v0.3.0
         with:
           coverage-file: coverage.out
-          wiki: false
+          amend: false
