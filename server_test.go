@@ -90,6 +90,7 @@ func TestMain(m *testing.M) {
 	})
 	// Enable debug logging for tests
 	Debug = true
+	os.Setenv("TEST_MODE", "1")
 	os.Exit(m.Run())
 }
 
@@ -1261,7 +1262,7 @@ func TestServerEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Errorf("Expected status %d, got %d", http.StatusFound, resp.StatusCode)
 	}
-	if loc := resp.Header().Get("Location"); loc != cfg.ThankYouURL {
+	if loc := resp.Header.Get("Location"); loc != cfg.ThankYouURL {
 		t.Errorf("Expected redirect to %q, got %q", cfg.ThankYouURL, loc)
 	}
 }

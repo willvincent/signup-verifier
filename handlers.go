@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -366,6 +367,11 @@ func (app *App) sendEmail(submitterEmail string, payload url.Values) error {
 	smtpPort := app.Config.EmailForward.SMTP.Port
 	smtpAddr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
 	auth := smtp.PlainAuth("", app.Config.EmailForward.SMTP.Username, app.Config.EmailForward.SMTP.Password, smtpHost)
+
+	// 🛠 Skip auth if in test mode
+	if os.Getenv("TEST_MODE") == "1" {
+		auth = nil
+	}
 
 	// Send email
 	if Debug {
