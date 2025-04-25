@@ -28,8 +28,8 @@ type Config struct {
 	OnError struct {
 		Method      string `yaml:method`
 		ForwardData bool   `yaml:forwardData`
-		Action      string `yaml:Action`
-	}
+		Action      string `yaml:action`
+	} `yaml:"onError"`
 
 	Health struct {
 		Route string `yaml:"route"`

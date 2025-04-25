@@ -10,14 +10,8 @@ import (
 	"github.com/willvincent/signup-verifier/internal/config"
 )
 
-var debug bool
-
-func init() {
-	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
-	flag.Parse()
-}
-
 func main() {
+	flag.Parse()
 	cfg, err := config.LoadConfig("config.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)

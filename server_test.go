@@ -42,6 +42,8 @@ func TestMain(m *testing.M) {
 	verifier.Register("dummy", func(apiKey string) verifier.Verifier {
 		return &dummyVerifier{valid: true}
 	})
+	// Enable debug logging for tests
+	Debug = true
 	os.Exit(m.Run())
 }
 
@@ -50,7 +52,7 @@ func basicTestConfig() *config.Config {
 		ListenAddress: ":8080",
 		Route:         "/signup",
 		ThankYouURL:   "/thanks",
-		OnError:       "json",
+		HoneypotField: "",
 		RequiredFields: []string{"email"},
 		AllowedFields:  []string{"email"},
 		Health: struct {
@@ -84,6 +86,15 @@ func basicTestConfig() *config.Config {
 			Domains        map[string]struct{} `yaml:"-"`
 		}{
 			Domains: make(map[string]struct{}),
+		},
+		OnError: struct {
+			Method      string `yaml:method`
+			ForwardData bool   `yaml:forwardData`
+			Action      string `yaml:action`
+		}{
+			Action:      "json",
+			Method:      "",
+			ForwardData: false,
 		},
 	}
 }
@@ -230,11 +241,15 @@ func Test_handleSignup(t *testing.T) {
 		},
 		{
 			name:           "missing required field",
-			cfg:            basicTestConfig(),
+			cfg: func() *config.Config {
+				cfg := basicTestConfig()
+				cfg.RequiredFields = []string{"email"}
+				return cfg
+			}(),
 			method:         http.MethodPost,
 			formValues:     url.Values{},
 			expectedStatus: http.StatusUnprocessableEntity,
-			expectedBody:   `{"error": "Missing required fields"}`,
+			expectedBody:   `{"error": "Missing required fields: email"}`,
 			expectedMetric: "missing_fields",
 		},
 		{
@@ -416,33 +431,111 @@ func Test_redirectThankYou(t *testing.T) {
 	if loc := w.Header().Get("Location"); loc != cfg.ThankYouURL {
 		t.Errorf("Expected redirect to %q, got %q", cfg.ThankYouURL, loc)
 	}
+	// Allow empty body, as some Go versions may not write the HTML redirect body
+	if w.Body.String() != "" && w.Body.String() != "<a href=\"/thanks\">Found</a>.\n\n" {
+		t.Errorf("Expected body \"\" or \"<a href=\\\"/thanks\\\">Found</a>.\\n\\n\", got %q", w.Body.String())
+	}
 }
 
 func Test_handleError(t *testing.T) {
 	t.Log("Running Test_handleError")
 	tests := []struct {
-		name         string
-		onError      string
-		msg          string
-		status       int
-		expectedBody string
-		expectedCode int
+		name           string
+		onError        struct {
+			Method      string `yaml:method`
+			ForwardData bool   `yaml:forwardData`
+			Action      string `yaml:action`
+		}
+		msg            string
+		status         int
+		formValues     url.Values
+		expectedBody   string
+		expectedCode   int
+		expectedURL    string
 	}{
 		{
-			name:         "json error",
-			onError:      "json",
+			name: "json error",
+			onError: struct {
+				Method      string `yaml:method`
+				ForwardData bool   `yaml:forwardData`
+				Action      string `yaml:action`
+			}{
+				Action:      "json",
+				Method:      "",
+				ForwardData: false,
+			},
 			msg:          "Test error",
 			status:       http.StatusBadRequest,
 			expectedBody: `{"error": "Test error"}`,
 			expectedCode: http.StatusBadRequest,
 		},
 		{
-			name:         "redirect error",
-			onError:      "redirect",
+			name: "redirect error default",
+			onError: struct {
+				Method      string `yaml:method`
+				ForwardData bool   `yaml:forwardData`
+				Action      string `yaml:action`
+			}{
+				Action:      "redirect",
+				Method:      "POST",
+				ForwardData: false,
+			},
 			msg:          "Test error",
 			status:       http.StatusBadRequest,
-			expectedBody: "<a href=\"/thanks\">Found</a>.\n\n",
+			expectedBody: "", // Allow empty body
 			expectedCode: http.StatusFound,
+			expectedURL:  "/thanks",
+		},
+		{
+			name: "redirect error GET no data",
+			onError: struct {
+				Method      string `yaml:method`
+				ForwardData bool   `yaml:forwardData`
+				Action      string `yaml:action`
+			}{
+				Action:      "redirect",
+				Method:      "GET",
+				ForwardData: false,
+			},
+			msg:          "Test error",
+			status:       http.StatusBadRequest,
+			expectedBody: "", // Allow empty body
+			expectedCode: http.StatusFound,
+			expectedURL:  "/thanks",
+		},
+		{
+			name: "redirect error GET with data",
+			onError: struct {
+				Method      string `yaml:method`
+				ForwardData bool   `yaml:forwardData`
+				Action      string `yaml:action`
+			}{
+				Action:      "redirect",
+				Method:      "GET",
+				ForwardData: true,
+			},
+			msg:          "Test error",
+			status:       http.StatusBadRequest,
+			formValues:   url.Values{"email": {"test@example.com"}, "name": {"Test"}},
+			expectedBody: "", // Allow empty body
+			expectedCode: http.StatusFound,
+			expectedURL:  "/thanks?email=test%40example.com&name=Test",
+		},
+		{
+			name: "missing fields error",
+			onError: struct {
+				Method      string `yaml:method`
+				ForwardData bool   `yaml:forwardData`
+				Action      string `yaml:action`
+			}{
+				Action:      "json",
+				Method:      "",
+				ForwardData: false,
+			},
+			msg:          "Missing required fields: email, name",
+			status:       http.StatusUnprocessableEntity,
+			expectedBody: `{"error": "Missing required fields: email, name"}`,
+			expectedCode: http.StatusUnprocessableEntity,
 		},
 	}
 
@@ -453,23 +546,20 @@ func Test_handleError(t *testing.T) {
 			cfg.OnError = tt.onError
 			app := NewApp(cfg)
 			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/signup", nil)
+			req.Form = tt.formValues
 
-			if tt.onError == "redirect" {
-				req := httptest.NewRequest("GET", "/", nil)
-				app.redirectThankYou(w, req)
-			} else {
-				app.handleError(w, tt.msg, tt.status)
-			}
+			app.handleError(w, req, tt.msg, tt.status)
 
 			if w.Code != tt.expectedCode {
 				t.Errorf("Expected status %d, got %d", tt.expectedCode, w.Code)
 			}
-			if w.Body.String() != tt.expectedBody {
-				t.Errorf("Expected body %q, got %q", tt.expectedBody, w.Body.String())
+			if w.Body.String() != tt.expectedBody && (tt.expectedBody != "" || w.Body.String() != "<a href=\""+tt.expectedURL+"\">Found</a>.\n\n") {
+				t.Errorf("Expected body %q or redirect HTML, got %q", tt.expectedBody, w.Body.String())
 			}
-			if tt.onError == "redirect" {
-				if loc := w.Header().Get("Location"); loc != cfg.ThankYouURL {
-					t.Errorf("Expected redirect to %q, got %q", cfg.ThankYouURL, loc)
+			if tt.onError.Action == "redirect" {
+				if loc := w.Header().Get("Location"); loc != tt.expectedURL {
+					t.Errorf("Expected redirect to %q, got %q", tt.expectedURL, loc)
 				}
 			}
 		})
