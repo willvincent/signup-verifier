@@ -30,9 +30,3 @@ jobs:
         with:
           name: coverage-report
           path: coverage.out
-
-      - name: Annotate uncovered lines (optional)
-        uses: ncruces/go-coverage-report@v0.3.0
-        with:
-          coverage-file: coverage.out
-          amend: false
